@@ -29,7 +29,8 @@ May 21st Update:
 
 3. Added the @image functionality.
 
-<img width="1990" height="910" alt="image" src="https://github.com/user-attachments/assets/d2e3a7cb-7f54-4961-842b-b21aa195796a" />
+![Uploading image.png…]()
+
 <img width="1865" height="1503" alt="image" src="https://github.com/user-attachments/assets/f4030201-67c6-4845-b08b-b6fdf304afaa" />
 
 
