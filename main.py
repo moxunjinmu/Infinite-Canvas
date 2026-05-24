@@ -1162,6 +1162,17 @@ class CanvasAssetDownloadRequest(BaseModel):
     urls: List[str] = []
     filename: str = "canvas-output-images.zip"
 
+class SmartCanvasGroupExportItem(BaseModel):
+    kind: str = ""
+    url: str = ""
+    text: str = ""
+    name: str = ""
+
+class SmartCanvasGroupExportRequest(BaseModel):
+    folder: str = ""
+    group_name: str = "group"
+    items: List[SmartCanvasGroupExportItem] = []
+
 class AssetLibraryCategoryRequest(BaseModel):
     name: str = "新文件夹"
     type: str = "image"
@@ -1739,9 +1750,25 @@ def load_asset_library():
         cats.append({"id": "workflows", "name": "工作流", "type": "workflow", "items": []})
     lib["categories"] = cats
     lib["updated_at"] = int(lib.get("updated_at") or now_ms())
+    sort_asset_library_items(lib)
+    return lib
+
+def sort_asset_library_items(lib):
+    for cat in lib.get("categories", []):
+        items = cat.get("items")
+        if isinstance(items, list):
+            def created_at_key(item):
+                if not isinstance(item, dict):
+                    return 0
+                try:
+                    return int(float(item.get("created_at") or 0))
+                except (TypeError, ValueError):
+                    return 0
+            items.sort(key=created_at_key, reverse=True)
     return lib
 
 def save_asset_library(lib):
+    sort_asset_library_items(lib)
     lib["updated_at"] = now_ms()
     os.makedirs(DATA_DIR, exist_ok=True)
     with open(ASSET_LIBRARY_PATH, "w", encoding="utf-8") as f:
@@ -1765,6 +1792,20 @@ def content_type_for_path(path):
         return "video/webm"
     if ext == ".mov":
         return "video/quicktime"
+    if ext == ".mp3":
+        return "audio/mpeg"
+    if ext == ".wav":
+        return "audio/wav"
+    if ext == ".m4a":
+        return "audio/mp4"
+    if ext == ".aac":
+        return "audio/aac"
+    if ext == ".ogg":
+        return "audio/ogg"
+    if ext == ".flac":
+        return "audio/flac"
+    if ext == ".gif":
+        return "image/gif"
     if ext in [".jpg", ".jpeg"]:
         return "image/jpeg"
     if ext == ".webp":
@@ -2683,19 +2724,35 @@ async def upload_image(files: List[UploadFile] = File(...)):
 @app.post("/api/ai/upload")
 async def upload_ai_reference(files: List[UploadFile] = File(...)):
     uploaded = []
+    image_exts = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+    video_exts = {".mp4", ".webm", ".mov", ".m4v"}
+    audio_exts = {".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac"}
     for file in files:
         content = await file.read()
         if not content:
             continue
         ext = os.path.splitext(file.filename or "")[1].lower()
-        if ext not in [".png", ".jpg", ".jpeg", ".webp"]:
-            content_type = (file.content_type or "").lower()
-            ext = ".jpg" if "jpeg" in content_type else ".webp" if "webp" in content_type else ".png"
+        content_type = (file.content_type or "").lower()
+        kind = "image"
+        if ext in video_exts or content_type.startswith("video/"):
+            kind = "video"
+            if ext not in video_exts:
+                ext = ".webm" if "webm" in content_type else ".mov" if "quicktime" in content_type else ".mp4"
+        elif ext in audio_exts or content_type.startswith("audio/"):
+            kind = "audio"
+            if ext not in audio_exts:
+                ext = ".wav" if "wav" in content_type else ".ogg" if "ogg" in content_type else ".m4a" if "mp4" in content_type else ".mp3"
+        elif ext in image_exts or content_type.startswith("image/"):
+            kind = "image"
+            if ext not in image_exts:
+                ext = ".jpg" if "jpeg" in content_type else ".webp" if "webp" in content_type else ".gif" if "gif" in content_type else ".png"
+        else:
+            continue
         filename = f"ai_ref_{uuid.uuid4().hex[:12]}{ext}"
         path = output_path_for(filename, "input")
         with open(path, "wb") as f:
             f.write(content)
-        uploaded.append({"url": output_url_for(filename, "input"), "name": file.filename or filename})
+        uploaded.append({"url": output_url_for(filename, "input"), "name": file.filename or filename, "kind": kind})
     return {"files": uploaded}
 
 @app.get("/api/config")
@@ -3515,6 +3572,70 @@ async def download_canvas_assets(payload: CanvasAssetDownloadRequest):
     encoded = urllib.parse.quote(filename)
     headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{encoded}"}
     return Response(buffer.getvalue(), media_type="application/zip", headers=headers)
+
+def sanitize_export_filename(name: str, fallback: str) -> str:
+    base = os.path.basename(str(name or "").strip()) or fallback
+    base = re.sub(r'[\\/:*?"<>|]+', "_", base)
+    return base or fallback
+
+def smart_group_export_folder(folder: str, group_name: str) -> str:
+    text = str(folder or "").strip()
+    if text:
+        path = os.path.abspath(os.path.expanduser(text))
+    else:
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        safe_group = sanitize_export_filename(group_name or "group", "group")
+        path = os.path.abspath(os.path.join(OUTPUT_DIR, "smart-groups", f"{safe_group}-{stamp}"))
+    os.makedirs(path, exist_ok=True)
+    return path
+
+@app.post("/api/smart-canvas/group-export")
+async def export_smart_canvas_group(payload: SmartCanvasGroupExportRequest):
+    target_dir = smart_group_export_folder(payload.folder, payload.group_name)
+    used_names = set()
+    count = 0
+    text_index = 1
+    for item in payload.items[:2000]:
+        kind = str(item.kind or "").lower()
+        if kind == "text":
+            text = str(item.text or "")
+            if not text.strip():
+                continue
+            base = sanitize_export_filename(item.name or f"{text_index}.txt", f"{text_index}.txt")
+            if not base.lower().endswith(".txt"):
+                base += ".txt"
+            text_index += 1
+            name, ext = os.path.splitext(base)
+            out_name = base
+            suffix = 2
+            while out_name in used_names:
+                out_name = f"{name}-{suffix}{ext}"
+                suffix += 1
+            used_names.add(out_name)
+            with open(os.path.join(target_dir, out_name), "w", encoding="utf-8") as f:
+                f.write(text)
+            count += 1
+            continue
+        src = output_file_from_url(item.url)
+        if not src or not os.path.isfile(src):
+            continue
+        base = sanitize_export_filename(item.name or os.path.basename(src), os.path.basename(src) or f"asset-{count + 1}")
+        name, ext = os.path.splitext(base)
+        if not ext:
+            _, src_ext = os.path.splitext(src)
+            ext = src_ext or ".bin"
+            base = name + ext
+        out_name = base
+        suffix = 2
+        while out_name in used_names:
+            out_name = f"{name}-{suffix}{ext}"
+            suffix += 1
+        used_names.add(out_name)
+        shutil.copy2(src, os.path.join(target_dir, out_name))
+        count += 1
+    if count <= 0:
+        raise HTTPException(status_code=404, detail="没有可导出的内容")
+    return {"ok": True, "folder": target_dir, "count": count}
 
 @app.get("/api/asset-library")
 async def get_asset_library():
