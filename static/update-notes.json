@@ -1,10 +1,22 @@
 {
-  "version": "2026.06.25",
-  "updated_at": "2026-06-25T20:37:00+08:00",
+  "version": "2026.06.29",
+  "updated_at": "2026-06-29T21:05:00+08:00",
   "items": [
     {
       "type": "improve",
-      "text": "修复智能画布生成新图导致的参数栏文本选中丢失的问题"
+      "text": "新增节点排序功能"
+    },
+    {
+      "type": "improve",
+      "text": "优化裁剪功能"
+    },
+    {
+      "type": "improve",
+      "text": "修复日志无法复制信息的bug"
+    },
+    {
+      "type": "improve",
+      "text": "修复Safari兼容问题"
     }
   ]
 }

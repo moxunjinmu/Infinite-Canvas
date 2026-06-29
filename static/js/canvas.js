@@ -175,6 +175,7 @@ const world = document.getElementById('world');
 const nodesEl = document.getElementById('nodes');
 const minimap = document.getElementById('minimap');
 const minimapContent = document.getElementById('minimapContent');
+const canvasArrangeBtn = document.getElementById('canvasArrangeBtn');
 let minimapViewport = document.getElementById('minimapViewport');
 const linksEl = document.getElementById('links');
 const linkControlsEl = document.getElementById('linkControls');
@@ -378,6 +379,8 @@ const cascadeSerialIds = new Set(); // 记录以串行循环模式启动的运�
 const cascadeContexts = new Map();
 let cropState = null;
 let cropDrag = null;
+let cropAspectPreset = 'free';
+let cropAspectRatio = null;
 let imageEditMode = 'crop';
 let imageEditModeTouched = false;
 let editDrawState = null;
@@ -761,9 +764,7 @@ function closeErrorModal(){
 async function copyErrorMessage(){
     const text = errorMessage?.textContent || '';
     if(!text) return;
-    try {
-        await navigator.clipboard.writeText(text);
-    } catch(e) {
+    if(!(await copyTextToClipboard(text))){
         const range = document.createRange();
         range.selectNodeContents(errorMessage);
         const sel = window.getSelection();
@@ -771,31 +772,66 @@ async function copyErrorMessage(){
         sel.addRange(range);
     }
 }
-async function copyTextToClipboard(text){
-    const value = String(text || '');
-    if(!value) return false;
+function copyTextWithCopyEvent(value){
+    let handled = false;
+    const onCopy = event => {
+        event.preventDefault();
+        event.clipboardData?.setData('text/plain', value);
+        handled = true;
+    };
+    document.addEventListener('copy', onCopy);
     try {
-        if(navigator.clipboard?.writeText){
-            await navigator.clipboard.writeText(value);
-            return true;
-        }
-    } catch(_) {}
+        return document.execCommand('copy') && handled;
+    } catch(_) {
+        return false;
+    } finally {
+        document.removeEventListener('copy', onCopy);
+    }
+}
+function copyTextWithTextarea(value){
+    let ta = null;
     try {
-        const ta = document.createElement('textarea');
+        ta = document.createElement('textarea');
         ta.value = value;
         ta.setAttribute('readonly', '');
         ta.style.position = 'fixed';
         ta.style.left = '-9999px';
         ta.style.top = '0';
+        ta.style.opacity = '0';
         document.body.appendChild(ta);
-        ta.focus();
+        ta.focus({preventScroll:true});
         ta.select();
-        const ok = document.execCommand('copy');
-        ta.remove();
-        return ok;
+        ta.setSelectionRange(0, ta.value.length);
+        return document.execCommand('copy');
     } catch(_) {
         return false;
+    } finally {
+        ta?.remove();
     }
+}
+async function clipboardMatchesText(value){
+    try {
+        if(navigator.clipboard?.readText && window.isSecureContext){
+            return (await navigator.clipboard.readText()) === value;
+        }
+    } catch(_) {}
+    return null;
+}
+async function copyTextToClipboard(text){
+    const value = String(text || '');
+    if(!value) return false;
+    if(copyTextWithCopyEvent(value) || copyTextWithTextarea(value)){
+        const verified = await clipboardMatchesText(value);
+        return verified !== false;
+    }
+    try {
+        if(navigator.clipboard?.writeText && window.isSecureContext !== false){
+            await navigator.clipboard.writeText(value);
+            const verified = await clipboardMatchesText(value);
+            return verified !== false;
+        }
+    } catch(_) {}
+    return false;
 }
 function parseRatioValue(value){
     const raw = String(value || '').trim();
@@ -1059,6 +1095,7 @@ function scheduleLinksRender(){
 }
 function renderMinimap(){
     if(!minimapContent || !minimapViewport) return;
+    canvasArrangeBtn?.classList.toggle('visible', selected.size > 0);
     const bounds = minimapBounds();
     const cw = minimapContent.clientWidth || 172;
     const ch = minimapContent.clientHeight || 110;
@@ -2172,8 +2209,40 @@ document.addEventListener('mousedown', e => {
 gateCanvasList?.addEventListener('scroll', () => requestAnimationFrame(positionCanvasMetaPopover), {passive:true});
 window.addEventListener('resize', () => requestAnimationFrame(positionCanvasMetaPopover));
 window.addEventListener('studio-theme-change', event => applyTheme(event.detail?.theme || 'light'));
-document.getElementById('cropBox').addEventListener('mousedown', event => beginCropDrag(event, 'move'));
-document.getElementById('cropHandle').addEventListener('mousedown', event => beginCropDrag(event, 'resize'));
+function cropDragModeFromPointer(event){
+    const explicit = event.target.closest?.('[data-crop-handle]')?.dataset?.cropHandle;
+    if(explicit) return `crop-${explicit}`;
+    if(imageEditMode !== 'crop') return 'move';
+    const box = document.getElementById('cropBox');
+    const rect = box?.getBoundingClientRect?.();
+    if(!rect) return 'move';
+    const slop = 16;
+    const x = event.clientX - rect.left;
+    const y = event.clientY - rect.top;
+    const nearL = x <= slop;
+    const nearR = rect.width - x <= slop;
+    const nearT = y <= slop;
+    const nearB = rect.height - y <= slop;
+    if(nearT && nearL) return 'crop-nw';
+    if(nearT && nearR) return 'crop-ne';
+    if(nearB && nearL) return 'crop-sw';
+    if(nearB && nearR) return 'crop-se';
+    if(nearT) return 'crop-n';
+    if(nearR) return 'crop-e';
+    if(nearB) return 'crop-s';
+    if(nearL) return 'crop-w';
+    return 'move';
+}
+document.getElementById('cropBox').addEventListener('mousedown', event => beginCropDrag(event, cropDragModeFromPointer(event)));
+document.querySelectorAll('[data-crop-handle]').forEach(handle => {
+    handle.addEventListener('mousedown', event => beginCropDrag(event, `crop-${handle.dataset.cropHandle || 'se'}`));
+});
+document.querySelectorAll('[data-crop-ratio]').forEach(btn => {
+    btn.addEventListener('click', event => {
+        event.stopPropagation();
+        setCropAspectPreset(btn.dataset.cropRatio || 'free');
+    });
+});
 document.getElementById('outpaintFrame')?.addEventListener('mousedown', event => {
     if(event.target.closest('[data-outpaint-handle]')) return;
     document.getElementById('cropCanvas')?.classList.add('dragging-image');
@@ -4333,6 +4402,7 @@ function setImageEditMode(mode, userTouched=false){
     cropCanvasEl.classList.toggle('outpaint-mode', imageEditMode === 'outpaint');
     _syncGridCustomCursor();
     document.querySelectorAll('[data-image-edit-mode]').forEach(btn => btn.classList.toggle('active', btn.dataset.imageEditMode === imageEditMode));
+    document.getElementById('imageCropTools')?.classList.toggle('active', imageEditMode === 'crop');
     document.getElementById('imageMaskTools').classList.toggle('active', imageEditMode === 'mask');
     document.getElementById('imageBrushTools').classList.toggle('active', imageEditMode === 'brush');
     document.getElementById('imageGridTools').classList.toggle('active', imageEditMode === 'grid');
@@ -5008,14 +5078,62 @@ function resetOutpaintBox(){
     cropState.h = h;
     renderCropBox();
 }
+function cropRatioFromPreset(preset){
+    if(!preset || preset === 'free') return null;
+    if(preset === 'source'){
+        const {w, h} = cropBounds();
+        return w > 0 && h > 0 ? w / h : null;
+    }
+    const parts = String(preset).split(':').map(v => Math.max(0, Number(v)));
+    return parts.length === 2 && parts[0] > 0 && parts[1] > 0 ? parts[0] / parts[1] : null;
+}
+function syncCropRatioButtons(){
+    document.querySelectorAll('[data-crop-ratio]').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.cropRatio === cropAspectPreset);
+    });
+}
+function fitCropRectToAspect(ratio, sourceRect=null){
+    const {w:boundsW, h:boundsH} = cropBounds();
+    const rect = sourceRect || cropState || {x:0, y:0, w:boundsW, h:boundsH};
+    const minSize = 24;
+    let nextW = Math.max(minSize, Number(rect.w || boundsW));
+    let nextH = Math.max(minSize, Number(rect.h || boundsH));
+    if(ratio){
+        if(nextW / nextH > ratio) nextW = nextH * ratio;
+        else nextH = nextW / ratio;
+        if(nextW > boundsW){ nextW = boundsW; nextH = nextW / ratio; }
+        if(nextH > boundsH){ nextH = boundsH; nextW = nextH * ratio; }
+    } else {
+        nextW = Math.min(nextW, boundsW);
+        nextH = Math.min(nextH, boundsH);
+    }
+    const cx = Number(rect.x || 0) + Number(rect.w || nextW) / 2;
+    const cy = Number(rect.y || 0) + Number(rect.h || nextH) / 2;
+    cropState.w = Math.round(nextW);
+    cropState.h = Math.round(nextH);
+    cropState.x = Math.round(cx - cropState.w / 2);
+    cropState.y = Math.round(cy - cropState.h / 2);
+    clampCrop();
+}
+function setCropAspectPreset(preset='free'){
+    cropAspectPreset = preset || 'free';
+    cropAspectRatio = cropRatioFromPreset(cropAspectPreset);
+    syncCropRatioButtons();
+    if(cropState && imageEditMode === 'crop' && cropAspectRatio){
+        fitCropRectToAspect(cropAspectRatio);
+        renderCropBox();
+    }
+}
 function resetCropBox(){
     if(!cropState) return;
     if(imageEditMode === 'outpaint') return resetOutpaintBox();
     const {w, h} = cropBounds();
-    cropState.x = Math.round(w * 0.08);
-    cropState.y = Math.round(h * 0.08);
-    cropState.w = Math.round(w * 0.84);
-    cropState.h = Math.round(h * 0.84);
+    const rect = {x:Math.round(w * 0.08), y:Math.round(h * 0.08), w:Math.round(w * 0.84), h:Math.round(h * 0.84)};
+    cropState.x = rect.x;
+    cropState.y = rect.y;
+    cropState.w = rect.w;
+    cropState.h = rect.h;
+    if(cropAspectRatio) fitCropRectToAspect(cropAspectRatio, rect);
     renderCropBox();
 }
 function openImageEditor(nodeId, initialMode='crop'){
@@ -5034,6 +5152,9 @@ function openImageEditor(nodeId, initialMode='crop'){
     imageEditBaseW = 0;
     imageEditBaseH = 0;
     imageEditModeTouched = false;
+    cropAspectPreset = 'free';
+    cropAspectRatio = null;
+    syncCropRatioButtons();
     editTextItems = [];
     editTextSelectedId = '';
     editTextDrag = null;
@@ -5093,6 +5214,9 @@ function closeImageEditor(){
     imageEditBaseW = 0;
     imageEditBaseH = 0;
     imageEditModeTouched = false;
+    cropAspectPreset = 'free';
+    cropAspectRatio = null;
+    syncCropRatioButtons();
     document.getElementById('imageEditStage')?.classList.remove('overflowing', 'overflow-x', 'overflow-y');
     const cropCanvasEl = document.getElementById('cropCanvas');
     cropCanvasEl.classList.remove('grid-custom-h', 'grid-custom-v', 'outpaint-mode', 'outpaint-warning', 'dragging-image', 'text-mode');
@@ -5138,6 +5262,93 @@ function resizeOutpaintFromDrag(dx, dy){
     cropState.y = start.y + Math.round((nextH - start.h) / 2);
     clampOutpaint();
 }
+function clampAspectCropToBounds(anchorX, anchorY, movingX, movingY, ratio, handle){
+    const {w:boundsW, h:boundsH} = cropBounds();
+    const minSize = 24;
+    let width = Math.max(minSize, Math.abs(movingX - anchorX));
+    let height = Math.max(minSize, Math.abs(movingY - anchorY));
+    const corner = /[ns][ew]/.test(handle);
+    if(corner){
+        if(width / height > ratio) width = height * ratio;
+        else height = width / ratio;
+    } else if(handle === 'e' || handle === 'w'){
+        height = width / ratio;
+    } else {
+        width = height * ratio;
+    }
+    const dirX = handle.includes('w') ? -1 : 1;
+    const dirY = handle.includes('n') ? -1 : 1;
+    const maxW = dirX < 0 ? anchorX : boundsW - anchorX;
+    const maxH = dirY < 0 ? anchorY : boundsH - anchorY;
+    width = Math.min(width, maxW);
+    height = Math.min(height, maxH);
+    if(width / height > ratio) width = height * ratio;
+    else height = width / ratio;
+    return {
+        x:dirX < 0 ? anchorX - width : anchorX,
+        y:dirY < 0 ? anchorY - height : anchorY,
+        w:width,
+        h:height
+    };
+}
+function resizeCropFromDrag(dx, dy){
+    const start = cropDrag?.start;
+    if(!start) return;
+    const handle = String(cropDrag.mode || 'resize').replace(/^crop-/, '') || 'se';
+    if(!cropAspectRatio){
+        let left = start.x;
+        let top = start.y;
+        let right = start.x + start.w;
+        let bottom = start.y + start.h;
+        if(handle.includes('w')) left += dx;
+        if(handle.includes('e') || handle === 'resize') right += dx;
+        if(handle.includes('n')) top += dy;
+        if(handle.includes('s') || handle === 'resize') bottom += dy;
+        cropState.x = Math.min(left, right - 24);
+        cropState.y = Math.min(top, bottom - 24);
+        cropState.w = Math.max(24, right - cropState.x);
+        cropState.h = Math.max(24, bottom - cropState.y);
+        return;
+    }
+    const normalized = handle === 'resize' ? 'se' : handle;
+    const centerX = start.x + start.w / 2;
+    const centerY = start.y + start.h / 2;
+    if(normalized === 'e' || normalized === 'w'){
+        const {w:boundsW, h:boundsH} = cropBounds();
+        let width = Math.max(24, normalized === 'e' ? start.w + dx : start.w - dx);
+        const maxW = normalized === 'e' ? boundsW - start.x : start.x + start.w;
+        const maxH = Math.max(24, 2 * Math.min(centerY, boundsH - centerY));
+        width = Math.min(width, maxW, maxH * cropAspectRatio);
+        const height = width / cropAspectRatio;
+        cropState.x = Math.round(normalized === 'e' ? start.x : start.x + start.w - width);
+        cropState.y = Math.round(centerY - height / 2);
+        cropState.w = Math.round(width);
+        cropState.h = Math.round(height);
+        return;
+    }
+    if(normalized === 'n' || normalized === 's'){
+        const {w:boundsW, h:boundsH} = cropBounds();
+        let height = Math.max(24, normalized === 's' ? start.h + dy : start.h - dy);
+        const maxH = normalized === 's' ? boundsH - start.y : start.y + start.h;
+        const maxW = Math.max(24, 2 * Math.min(centerX, boundsW - centerX));
+        height = Math.min(height, maxH, maxW / cropAspectRatio);
+        const width = height * cropAspectRatio;
+        cropState.x = Math.round(centerX - width / 2);
+        cropState.y = Math.round(normalized === 's' ? start.y : start.y + start.h - height);
+        cropState.w = Math.round(width);
+        cropState.h = Math.round(height);
+        return;
+    }
+    let anchorX = normalized.includes('w') ? start.x + start.w : normalized.includes('e') ? start.x : centerX;
+    let anchorY = normalized.includes('n') ? start.y + start.h : normalized.includes('s') ? start.y : centerY;
+    let movingX = normalized.includes('w') ? start.x + dx : normalized.includes('e') ? start.x + start.w + dx : centerX;
+    let movingY = normalized.includes('n') ? start.y + dy : normalized.includes('s') ? start.y + start.h + dy : centerY;
+    const next = clampAspectCropToBounds(anchorX, anchorY, movingX, movingY, cropAspectRatio, normalized);
+    cropState.x = Math.round(next.x);
+    cropState.y = Math.round(next.y);
+    cropState.w = Math.round(next.w);
+    cropState.h = Math.round(next.h);
+}
 window.addEventListener('mousemove', event => {
     if(!cropDrag || !cropState) return;
     const dx = event.clientX - cropDrag.sx;
@@ -5151,8 +5362,7 @@ window.addEventListener('mousemove', event => {
     } else if(String(cropDrag.mode || '').startsWith('outpaint-')){
         resizeOutpaintFromDrag(dx, dy);
     } else {
-        cropState.w = cropDrag.start.w + dx;
-        cropState.h = cropDrag.start.h + dy;
+        resizeCropFromDrag(dx, dy);
     }
     clampCrop();
     renderCropBox();
@@ -11478,13 +11688,13 @@ function renderCanvasLog(){
     });
     const bindCanvasLogCopy = (selector, key) => {
         list.querySelectorAll(selector).forEach(el => {
-            el.onclick = e => {
+            el.onclick = async e => {
                 e.stopPropagation();
                 const text = el.dataset[key] || '';
-                if(text) navigator.clipboard?.writeText(text).catch(() => {});
+                const copied = await copyTextToClipboard(text);
                 const oldText = el.textContent;
-                el.textContent = tr('canvas.copied');
-                el.classList.add('copied');
+                el.textContent = copied ? tr('canvas.copied') : tr('canvas.copyFailed');
+                if(copied) el.classList.add('copied');
                 setTimeout(() => {
                     el.textContent = oldText;
                     el.classList.remove('copied');
@@ -13336,6 +13546,111 @@ function nodeRect(n){
     const h = el?.offsetHeight || n.h || 200;
     return {x:n.x, y:n.y, w, h, cx:n.x + w/2, cy:n.y + h/2};
 }
+function connectedClusterIds(seedId){
+    const ids = new Set(nodes.map(n => n.id));
+    if(!ids.has(seedId)) return [];
+    const seen = new Set([seedId]);
+    const queue = [seedId];
+    while(queue.length){
+        const id = queue.shift();
+        connections.forEach(c => {
+            if(c.from !== id && c.to !== id) return;
+            const next = c.from === id ? c.to : c.from;
+            if(!ids.has(next) || seen.has(next)) return;
+            seen.add(next);
+            queue.push(next);
+        });
+    }
+    return [...seen];
+}
+function canvasArrangeAtomicIds(ids){
+    const out = new Set((ids || []).filter(id => nodes.some(n => n.id === id)));
+    let changed = true;
+    while(changed){
+        changed = false;
+        nodes.filter(n => (n.type === 'group' || n.type === 'promptGroup') && Array.isArray(n.items)).forEach(group => {
+            (group.items || []).forEach(itemId => {
+                if(!out.has(itemId)) return;
+                out.delete(itemId);
+                out.add(group.id);
+                changed = true;
+            });
+        });
+    }
+    return [...out];
+}
+function translateCanvasNodeWithMembers(node, dx, dy, seen=new Set()){
+    if(!node || seen.has(node.id)) return;
+    seen.add(node.id);
+    node.x = Math.round((Number(node.x) || 0) + dx);
+    node.y = Math.round((Number(node.y) || 0) + dy);
+    if(node.type === 'group' || node.type === 'promptGroup'){
+        (node.items || []).forEach(id => translateCanvasNodeWithMembers(nodes.find(n => n.id === id), dx, dy, seen));
+    }
+}
+function moveCanvasNodeAtom(node, x, y){
+    const dx = Math.round(x - (Number(node.x) || 0));
+    const dy = Math.round(y - (Number(node.y) || 0));
+    translateCanvasNodeWithMembers(node, dx, dy);
+}
+function arrangeIdsByConnections(ids){
+    const idSet = new Set(canvasArrangeAtomicIds(ids));
+    const selectedNodes = [...idSet].map(id => nodes.find(n => n.id === id)).filter(Boolean);
+    if(selectedNodes.length < 2) return false;
+    const rects = selectedNodes.map(n => ({node:n, rect:nodeRect(n)}));
+    const startX = Math.min(...rects.map(item => item.rect.x));
+    const startY = Math.min(...rects.map(item => item.rect.y));
+    const internal = connections.filter(c => idSet.has(c.from) && idSet.has(c.to));
+    const depth = new Map(selectedNodes.map(n => [n.id, 0]));
+    if(internal.length){
+        const indegree = new Map(selectedNodes.map(n => [n.id, 0]));
+        internal.forEach(c => indegree.set(c.to, (indegree.get(c.to) || 0) + 1));
+        const roots = [...indegree.entries()].filter(([, n]) => n === 0).map(([id]) => id);
+        const queue = roots.length ? roots.slice() : [selectedNodes[0].id];
+        const seen = new Set(queue);
+        while(queue.length){
+            const id = queue.shift();
+            internal.filter(c => c.from === id).forEach(c => {
+                depth.set(c.to, Math.max(depth.get(c.to) || 0, (depth.get(id) || 0) + 1));
+                if(!seen.has(c.to)){
+                    seen.add(c.to);
+                    queue.push(c.to);
+                }
+            });
+        }
+    }
+    const groups = new Map();
+    selectedNodes.forEach(n => {
+        const d = depth.get(n.id) || 0;
+        if(!groups.has(d)) groups.set(d, []);
+        groups.get(d).push(n);
+    });
+    const sortedDepths = [...groups.keys()].sort((a, b) => a - b);
+    let x = startX;
+    sortedDepths.forEach(d => {
+        const col = groups.get(d).slice().sort((a, b) => nodeRect(a).y - nodeRect(b).y || String(a.id).localeCompare(String(b.id)));
+        let y = startY;
+        let maxW = 0;
+        col.forEach(n => {
+            const r = nodeRect(n);
+            moveCanvasNodeAtom(n, x, y);
+            y += Math.max(120, r.h) + 56;
+            maxW = Math.max(maxW, Math.max(220, r.w));
+        });
+        x += maxW + 180;
+    });
+    return true;
+}
+function arrangeSelectedCanvasNodes(){
+    if(!canvas || !selected.size) return;
+    const explicit = [...selected].filter(id => nodes.some(n => n.id === id));
+    const ids = canvasArrangeAtomicIds(explicit.length > 1 ? explicit : connectedClusterIds(explicit[0]));
+    if(ids.length < 2) return;
+    pushUndo();
+    if(!arrangeIdsByConnections(ids)) return;
+    render();
+    scheduleSave();
+}
 function handoffExistingInputsToGroup(group, children){
     if(!group || group.type !== 'group') return false;
     const childIds = new Set((children || []).filter(n => ['image','prompt'].includes(n?.type)).map(n => n.id));
@@ -13445,8 +13760,10 @@ function renderLinks(){
         if(!canResolvePort(c.from) || !canResolvePort(c.to)) return;
         segments.push({c, a:portPoint(c.from, 'out'), b:portPoint(c.to, 'in')});
     });
+    const hasSelection = selected.size > 0;
     segments.forEach(({c, a, b}) => {
-        linksEl.appendChild(pathEl(a.x, a.y, b.x, b.y, 'link'));
+        const relClass = isConnectionSelected(c) ? ' link-active' : hasSelection ? ' link-dim' : '';
+        linksEl.appendChild(pathEl(a.x, a.y, b.x, b.y, `link${relClass}`));
         linkControlsEl.appendChild(linkDeleteButton(c, a, b));
         linksEl.appendChild(linkHitEl(a.x, a.y, b.x, b.y, c.id));
     });
@@ -13657,6 +13974,7 @@ function isEditableTarget(target){
 }
 minimap?.addEventListener('mousedown', e => {
     if(!canvas || e.button !== 0) return;
+    if(e.target.closest?.('#canvasArrangeBtn')) return;
     e.preventDefault();
     e.stopPropagation();
     minimapDrag = true;
@@ -13670,6 +13988,12 @@ minimap?.addEventListener('mousedown', e => {
         window.onmouseup = null;
         scheduleViewportSave();
     };
+});
+canvasArrangeBtn?.addEventListener('mousedown', e => e.stopPropagation());
+canvasArrangeBtn?.addEventListener('click', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    arrangeSelectedCanvasNodes();
 });
 function isZoomPreviewIgnoredTarget(target){
     return !!target?.closest?.('#createMenu, #linkCreateMenu, #nodeInputMenu, #nodeOutputMenu, #imageNodeMenu, .minimap, #canvasAssetPanel, #assetManagerModal, #workflowTransferModal, #logModal, #promptTemplateModal, #imageEditModal, #outputLightbox');
